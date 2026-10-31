@@ -1,0 +1,10 @@
+version = 1
+name = "copy-trail"
+
+[setup]
+script = ""
+
+[[actions]]
+name = "Run on Mac"
+icon = "run"
+command = "./script/build_and_run.sh"
