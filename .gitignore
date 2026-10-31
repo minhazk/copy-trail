@@ -3,3 +3,18 @@
 dist/
 .DS_Store
 *.xcodeproj/xcuserdata/
+
+# Local credentials and signing material
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p8
+*.p12
+*.pfx
+*.mobileprovision
+*.provisionprofile
+
+# Local diagnostic output
+*.log

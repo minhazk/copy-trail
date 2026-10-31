@@ -1,9 +1,25 @@
 import Foundation
 import Observation
 
+public enum ClipContent: Equatable {
+    case text(String)
+    case image(data: Data, type: String)
+
+    var byteCount: Int {
+        switch self {
+        case .text(let text): return text.utf8.count
+        case .image(let data, _): return data.count
+        }
+    }
+}
+
 public struct Clip: Identifiable, Equatable {
     public let id: UUID
-    public let text: String
+    public let content: ClipContent
+    public var text: String {
+        if case .text(let text) = content { return text }
+        return ""
+    }
     public let copiedAt: Date
 }
 
@@ -12,7 +28,9 @@ public protocol ClipboardAccess: AnyObject {
     var changeCount: Int { get }
     var typeNames: Set<String> { get }
     func readText() -> String?
+    func readImage() -> ClipContent?
     func writeText(_ text: String) -> Bool
+    func writeImage(_ data: Data, type: String) -> Bool
 }
 
 /// The clipboard is read only after a change. History never writes to disk.
@@ -25,6 +43,8 @@ public final class ClipboardHistory {
     @ObservationIgnored private let clipboard: any ClipboardAccess
     @ObservationIgnored private var lastChange: Int
     private static let maximumTextBytes = 1_000_000
+    public static let maximumImageBytes = 20 * 1_024 * 1_024
+    private let maximumHistoryBytes: Int
 
     // Best-effort conventions, not a guarantee that all secrets are identified.
     private static let ignoredTypes: Set<String> = [
@@ -36,9 +56,10 @@ public final class ClipboardHistory {
         "com.apple.is-remote-clipboard"
     ]
 
-    public init(clipboard: any ClipboardAccess, capacity: Int = 100) {
+    public init(clipboard: any ClipboardAccess, capacity: Int = 100, maximumHistoryBytes: Int = 100 * 1_024 * 1_024) {
         self.clipboard = clipboard
         self.capacity = max(1, capacity)
+        self.maximumHistoryBytes = max(1, maximumHistoryBytes)
         self.lastChange = clipboard.changeCount
     }
 
@@ -48,18 +69,34 @@ public final class ClipboardHistory {
         lastChange = change
         guard !isPaused,
               clipboard.typeNames.isDisjoint(with: Self.ignoredTypes),
-              let text = clipboard.readText(),
               clipboard.changeCount == change else { return }
-        remember(text)
+        let content: ClipContent?
+        if !clipboard.typeNames.isDisjoint(with: ["public.png", "public.tiff"]) {
+            content = clipboard.readImage()
+        } else {
+            content = clipboard.readText().map(ClipContent.text)
+        }
+        guard let content, clipboard.changeCount == change else { return }
+        remember(content)
     }
 
-    private func remember(_ text: String) {
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              text.utf8.count <= Self.maximumTextBytes else { return }
-        let existingID = clips.first(where: { $0.text == text })?.id
-        clips.removeAll { $0.text == text }
-        clips.insert(Clip(id: existingID ?? UUID(), text: text, copiedAt: Date()), at: 0)
-        if clips.count > capacity { clips.removeLast(clips.count - capacity) }
+    private func remember(_ content: ClipContent) {
+        switch content {
+        case .text(let text):
+            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  content.byteCount <= Self.maximumTextBytes else { return }
+        case .image(let data, let type):
+            guard !data.isEmpty, data.count <= Self.maximumImageBytes,
+                  ["public.png", "public.tiff"].contains(type) else { return }
+        }
+        guard content.byteCount <= maximumHistoryBytes else { return }
+        let existingID = clips.first(where: { $0.content == content })?.id
+        clips.removeAll { $0.content == content }
+        clips.insert(Clip(id: existingID ?? UUID(), content: content, copiedAt: Date()), at: 0)
+        var bytes = clips.reduce(0) { $0 + $1.content.byteCount }
+        while clips.count > capacity || bytes > maximumHistoryBytes {
+            bytes -= clips.removeLast().content.byteCount
+        }
     }
 
     public func setPaused(_ paused: Bool) {
@@ -78,18 +115,28 @@ public final class ClipboardHistory {
 
     @discardableResult
     public func restore(_ clip: Clip) -> Bool {
-        guard clipboard.writeText(clip.text) else {
+        let written: Bool
+        switch clip.content {
+        case .text(let text): written = clipboard.writeText(text)
+        case .image(let data, let type): written = clipboard.writeImage(data, type: type)
+        }
+        guard written else {
             message = "Could not copy this item. Please try again."
             return false
         }
         lastChange = clipboard.changeCount
-        remember(clip.text)
+        remember(clip.content)
         message = nil
         return true
     }
 
     public func matching(_ query: String) -> [Clip] {
         guard !query.isEmpty else { return clips }
-        return clips.filter { $0.text.localizedStandardContains(query) }
+        return clips.filter {
+            switch $0.content {
+            case .text(let text): return text.localizedStandardContains(query)
+            case .image: return "Image Screenshot".localizedStandardContains(query)
+            }
+        }
     }
 }

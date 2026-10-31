@@ -6,12 +6,15 @@ private final class FakeClipboard: ClipboardAccess {
     var changeCount = 0
     var typeNames: Set<String> = []
     var text: String?
+    var image: ClipContent?
+    var imageReadCount = 0
     var readCount = 0
     var writeCount = 0
     var writeSucceeds = true
     var changesDuringRead = false
 
     func copy(_ value: String, types: Set<String> = []) {
+        image = nil
         text = value
         typeNames = types
         changeCount += 1
@@ -21,6 +24,26 @@ private final class FakeClipboard: ClipboardAccess {
         readCount += 1
         if changesDuringRead { changeCount += 1 }
         return text
+    }
+
+    func copyImage(_ data: Data, type: String = "public.png", extraTypes: Set<String> = []) {
+        image = .image(data: data, type: type)
+        text = nil
+        typeNames = extraTypes.union([type])
+        changeCount += 1
+    }
+
+    func readImage() -> ClipContent? {
+        imageReadCount += 1
+        if changesDuringRead { changeCount += 1 }
+        return image
+    }
+
+    func writeImage(_ data: Data, type: String) -> Bool {
+        writeCount += 1
+        guard writeSucceeds else { return false }
+        copyImage(data, type: type)
+        return true
     }
 
     func writeText(_ value: String) -> Bool {
@@ -148,4 +171,76 @@ final class ClipboardHistoryTests: XCTestCase {
         XCTAssertEqual(history.matching("").count, 2)
         XCTAssertTrue(history.matching("missing").isEmpty)
     }
+    @MainActor func testImagesRecordDeduplicateRestoreAndSearchWithoutTextConversion() async {
+        let board = FakeClipboard()
+        let history = ClipboardHistory(clipboard: board)
+        let image = Data([1, 2, 3, 4])
+        board.copyImage(image); history.poll()
+        let original = history.clips[0]
+        XCTAssertEqual(original.content, .image(data: image, type: "public.png"))
+        XCTAssertEqual(board.writeCount, 0)
+        board.copy("text"); history.poll()
+        board.copyImage(image); history.poll()
+        XCTAssertEqual(history.clips.count, 2)
+        XCTAssertEqual(history.clips[0].id, original.id)
+        XCTAssertEqual(history.matching("screenshot").count, 1)
+        board.copy("newest"); history.poll()
+        XCTAssertNotEqual(history.clips[0].id, original.id)
+        XCTAssertTrue(history.restore(original))
+        history.poll()
+        XCTAssertEqual(board.image, original.content)
+        XCTAssertEqual(board.writeCount, 1)
+        XCTAssertEqual(history.clips.count, 3)
+        XCTAssertEqual(history.clips[0].id, original.id)
+        XCTAssertGreaterThanOrEqual(history.clips[0].copiedAt, original.copiedAt)
+        history.clear()
+        XCTAssertEqual(board.image, original.content)
+    }
+
+    @MainActor func testImagePrivacyPauseAndRacingReadAreRespected() async {
+        let board = FakeClipboard()
+        let history = ClipboardHistory(clipboard: board)
+        for marker in ["com.apple.is-remote-clipboard", "org.nspasteboard.ConcealedType"] {
+            board.copyImage(Data([1]), extraTypes: [marker]); history.poll()
+        }
+        history.setPaused(true)
+        board.copyImage(Data([2])); history.poll()
+        history.setPaused(false)
+        history.poll()
+        XCTAssertEqual(board.imageReadCount, 0)
+        board.changesDuringRead = true
+        board.copyImage(Data([3])); history.poll()
+        XCTAssertTrue(history.clips.isEmpty)
+    }
+
+    @MainActor func testImageLimitsAndTotalMemoryEvictOldest() async {
+        let board = FakeClipboard()
+        let history = ClipboardHistory(clipboard: board, maximumHistoryBytes: 8)
+        board.copyImage(Data([1, 2, 3, 4, 5])); history.poll()
+        board.copyImage(Data([6, 7, 8, 9])); history.poll()
+        XCTAssertEqual(history.clips.count, 1)
+        XCTAssertEqual(history.clips[0].content, .image(data: Data([6, 7, 8, 9]), type: "public.png"))
+        board.copyImage(Data(repeating: 1, count: ClipboardHistory.maximumImageBytes + 1)); history.poll()
+        XCTAssertEqual(history.clips.count, 1)
+    }
+
+    @MainActor func testDefaultHistoryKeepsNewestHundredAndEvictsOldest() async {
+        let board = FakeClipboard()
+        let history = ClipboardHistory(clipboard: board)
+        for index in 1...100 {
+            board.copy("Clip \(index)"); history.poll()
+        }
+        XCTAssertEqual(history.clips.count, 100)
+        let previousNewest = history.clips[0]
+        board.copy("Clip 101"); history.poll()
+        XCTAssertEqual(history.clips.count, 100)
+        XCTAssertEqual(history.clips.first?.text, "Clip 101")
+        XCTAssertEqual(history.clips.last?.text, "Clip 2")
+        XCTAssertFalse(history.clips.contains { $0.text == "Clip 1" })
+        XCTAssertTrue(history.restore(previousNewest))
+        XCTAssertEqual(history.clips.count, 100)
+        XCTAssertEqual(history.clips.first?.id, previousNewest.id)
+        XCTAssertEqual(board.text, "Clip 100")
+    }
+
 }

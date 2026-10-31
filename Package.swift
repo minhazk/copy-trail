@@ -8,6 +8,7 @@ let package = Package(
     targets: [
         .target(name: "CopyTrailCore"),
         .executableTarget(name: "CopyTrail", dependencies: ["CopyTrailCore"]),
-        .testTarget(name: "CopyTrailCoreTests", dependencies: ["CopyTrailCore"])
+        .testTarget(name: "CopyTrailCoreTests", dependencies: ["CopyTrailCore"]),
+        .testTarget(name: "CopyTrailTests", dependencies: ["CopyTrail"])
     ]
 )
